@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DDR Bank — Authentication & Authorization Flow</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+    header {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border-bottom: 1px solid #334155;
+      padding: 24px 40px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+    header h1 {
+      font-size: 22px;
+      font-weight: 600;
+      color: #f8fafc;
+    }
+    header span {
+      font-size: 14px;
+      color: #94a3b8;
+      padding: 4px 12px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px;
+    }
+    .legend {
+      display: flex;
+      gap: 20px;
+      padding: 16px 40px;
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #cbd5e1;
+    }
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+    }
+    .dot-blue { background: #3b82f6; }
+    .dot-green { background: #22c55e; }
+    .dot-yellow { background: #eab308; }
+    .dot-red { background: #ef4444; }
+    .controls {
+      padding: 12px 40px;
+      display: flex;
+      gap: 10px;
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+    }
+    .controls button {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .controls button:hover {
+      background: #334155;
+      border-color: #475569;
+    }
+    .diagram-container {
+      padding: 40px;
+      overflow-x: auto;
+      display: flex;
+      justify-content: center;
+    }
+    .mermaid {
+      min-width: 900px;
+    }
+    /* Override Mermaid dark theme tweaks */
+    .mermaid .messageText { fill: #e2e8f0 !important; font-size: 13px !important; }
+    .mermaid .actor { fill: #1e293b !important; stroke: #475569 !important; }
+    .mermaid .actor-line { stroke: #334155 !important; }
+    .mermaid text.actor > tspan { fill: #f1f5f9 !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>DDR Bank &mdash; Authentication &amp; Authorization Flow</h1>
+    <span>IBM Verify + HCP Vault + Agentic AI</span>
+  </header>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot dot-blue"></div> Scenario 1: User Login (OAuth 2.0)</div>
+    <div class="legend-item"><div class="legend-dot dot-green"></div> Scenario 2: Account Balances (Read-only)</div>
+    <div class="legend-item"><div class="legend-dot dot-yellow"></div> Scenario 3: Small Transfer &mdash; $50</div>
+    <div class="legend-item"><div class="legend-dot dot-red"></div> Scenario 4: Large Transfer &mdash; $5,000 (HITL)</div>
+  </div>
+  <div class="controls">
+    <button onclick="document.querySelector('.mermaid svg').style.transform='scale(1)'; currentScale=1;">Reset Zoom</button>
+    <button onclick="zoomIn()">Zoom In (+)</button>
+    <button onclick="zoomOut()">Zoom Out (&minus;)</button>
+    <button onclick="window.print()">Export / Print</button>
+  </div>
+  <div class="diagram-container">
+    <pre class="mermaid">
+sequenceDiagram
+    participant U as User (Browser)
+    participant E as Edge Middleware
+    participant N as Next.js (Vercel)
+    participant V as HCP Vault
+    participant IV as IBM Verify
+    participant G as Gemini (LLM)
+
+    %% ═══════════════════════════════════════════
+    %% SCENARIO 1: Initial Authentication
+    %% ═══════════════════════════════════════════
+    rect rgba(59, 130, 246, 0.12)
+    note over U,G: SCENARIO 1 — User Login (OAuth 2.0 Authorization Code Flow)
+
+    U->>E: GET / (no cookies)
+    E->>E: Check access_token cookie
+    E-->>U: 302 Redirect to /login
+    U->>N: GET /login
+    N-->>U: Login page rendered
+
+    U->>N: Click Sign In → GET /api/auth/redirect
+    N->>IV: 302 /oauth2/authorize — scope: openid profile email agentic
+    IV-->>U: IBM Verify login page
+    U->>IV: Enter credentials
+    IV-->>U: 302 /api/auth/callback?code=AUTH_CODE
+
+    U->>N: GET /api/auth/callback?code=AUTH_CODE
+    N->>V: getSecrets() — resolve Vault credential
+    V->>V: GET /v1/ibm-verify/creds/oidc-smt
+    V-->>N: client_secret (cached 1hr)
+    N->>IV: POST /oauth2/token — grant_type=authorization_code
+
+    alt CSIAQ0155E — stale Vault-rotated secret
+        IV-->>N: Error CSIAQ0155E
+        N->>N: invalidateSecretCache()
+        N->>V: getSecrets() — fetch fresh secret
+        V-->>N: new client_secret
+        N->>IV: POST /oauth2/token (retry with new secret)
+    end
+
+    IV-->>N: access_token + id_token + refresh_token
+    N->>N: parseIdToken → uniqueSecurityName
+    N->>N: clearSession() + setAuthCookies()
+    N-->>U: 302 → / with Set-Cookie: access_token, id_token
+
+    U->>E: GET / (with cookies)
+    E->>E: access_token present — allow
+    E-->>N: NextResponse.next() + no-cache headers
+    N->>N: Server Component reads cookies, initializes per-user data
+    N-->>U: Dashboard rendered
+    end
+
+    %% ═══════════════════════════════════════════
+    %% SCENARIO 2: Ask for Account Balances
+    %% ═══════════════════════════════════════════
+    rect rgba(34, 197, 94, 0.12)
+    note over U,G: SCENARIO 2 — "What are my account balances?" (read-only tool)
+
+    U->>N: POST /api/agent/chat (SSE stream)
+
+    Note over N: Guardrails: injection, off-topic, cross-user — all pass
+
+    N->>V: getVaultSecret('GEMINI_API_KEY_SMT')
+    V-->>N: Gemini API key
+    N->>G: invoke() with system prompt + 6 tools
+    G-->>N: tool_call: get_account_data
+
+    Note over N,IV: MIDDLEWARE — Step 1: Token Introspection
+    N->>V: getSecrets() — cached client_secret
+    N->>IV: POST /oauth2/introspect — validate access_token
+    IV-->>N: { active: true }
+    N-->>U: SSE security:introspection — active
+
+    Note over N,IV: MIDDLEWARE — Step 2: RAR Token Exchange
+    N->>V: getSecrets() — cached
+    N-->>U: SSE security:vault_fetch — complete
+    N->>IV: POST /oauth2/token — grant_type=token-exchange, scope=accounts:read
+    IV-->>N: scoped access_token (accounts:read)
+    N-->>U: SSE security:token_exchange — complete
+
+    Note over N: Tool Execution
+    N->>N: get_account_data() — in-memory store lookup
+    N-->>U: SSE security:tool_execute — complete
+
+    N->>G: Summarize tool output for user
+    G-->>N: Friendly account summary
+    N-->>U: SSE ai response + end
+    end
+
+    %% ═══════════════════════════════════════════
+    %% SCENARIO 3: Small Transfer ($50)
+    %% ═══════════════════════════════════════════
+    rect rgba(234, 179, 8, 0.12)
+    note over U,G: SCENARIO 3 — "Transfer $50 from checking to savings"
+
+    U->>N: POST /api/agent/chat (SSE stream)
+    N->>N: Guardrails — all pass
+    N->>G: invoke() with tools
+    G-->>N: tool_call: transfer_funds(checking, savings, 50)
+
+    Note over N,IV: MIDDLEWARE — Step 1: Token Introspection
+    N->>IV: POST /oauth2/introspect
+    IV-->>N: { active: true }
+
+    Note over N: MIDDLEWARE — Step 2: Suspicious Activity Check
+    N->>N: $50 is under $10,000 threshold — OK
+
+    Note over N,IV: MIDDLEWARE — Step 3: RAR Token Exchange
+    N->>V: getSecrets()
+    V-->>N: client_secret
+    N->>IV: POST /oauth2/token — grant_type=token-exchange
+    Note over IV: scope=transfer:all + authorization_details<br/>[{type:transfer, amount:50, currency:USD}]
+    IV-->>N: scoped access_token (transfer:all)
+    Note over IV: Policy engine: $50 — no step-up needed
+
+    Note over N: Tool Execution
+    N->>N: transfer_funds(checking → savings, $50)
+    N->>G: Summarize result
+    G-->>N: Transfer confirmation
+    N-->>U: SSE ai response + end
+    end
+
+    %% ═══════════════════════════════════════════
+    %% SCENARIO 4: Large Transfer ($5,000) — HITL
+    %% ═══════════════════════════════════════════
+    rect rgba(239, 68, 68, 0.12)
+    note over U,G: SCENARIO 4 — "Transfer $5,000 from checking to savings" (HITL required)
+
+    U->>N: POST /api/agent/chat (SSE stream)
+    N->>N: Guardrails — all pass
+    N->>G: invoke() with tools
+    G-->>N: tool_call: transfer_funds(checking, savings, 5000)
+
+    Note over N,IV: MIDDLEWARE — Step 1: Token Introspection
+    N->>IV: POST /oauth2/introspect
+    IV-->>N: { active: true }
+
+    Note over N: MIDDLEWARE — Step 2: Suspicious Activity Check
+    N->>N: $5,000 is under $10,000 — OK
+
+    Note over N,IV: MIDDLEWARE — Step 3: RAR Token Exchange — MFA Challenge!
+    N->>V: getSecrets()
+    V-->>N: client_secret
+    N->>IV: POST /oauth2/token — grant_type=token-exchange
+    Note over IV: scope=transfer:all + authorization_details<br/>[{type:transfer, amount:5000, currency:USD}]
+    IV-->>N: { scope: mfa_challenge, access_token: mfa_token }
+    Note over IV: Policy engine: $5,000 requires step-up auth
+
+    Note over N,IV: MIDDLEWARE — Step 4: HITL Push Authorization
+    N->>IV: GET /v2.0/factors — list enrolled authenticators
+    IV-->>N: factor: signature / userPresence
+    N->>IV: POST /v1.0/authenticators/{id}/verifications
+    Note over IV: Push: "Approve transfer of $5,000.00"
+    IV-->>N: transactionUri
+    N-->>U: SSE push_auth_pending — check your device
+    IV-->>U: Push notification to mobile device
+
+    loop Poll every 3s (max 50s — Vercel limit)
+        N->>IV: GET /v1.0/authenticators/verifications/{id}
+        N-->>U: SSE push_auth_polling (attempt N)
+        IV-->>N: { state: PENDING }
+    end
+
+    alt User APPROVES on device
+        U->>IV: Tap Approve on IBM Verify app
+        N->>IV: GET /verifications/{id}
+        IV-->>N: { state: VERIFY_SUCCESS, assertion: JWT }
+        N-->>U: SSE push_auth_approved
+
+        Note over N,IV: MIDDLEWARE — Step 5: Exchange assertion for scoped token
+        N->>V: getSecrets()
+        V-->>N: client_secret
+        N->>IV: POST /oauth2/token — grant_type=jwt-bearer, assertion=JWT
+        IV-->>N: scoped access_token (transfer:all)
+        N-->>U: SSE security:hitl_result — complete
+        Note over N: CAEP: assurance-level-change aal1 → aal2
+
+        Note over N: Tool Execution
+        N->>N: transfer_funds(checking → savings, $5,000)
+        N->>G: Summarize result
+        G-->>N: Transfer confirmation
+        N-->>U: SSE ai response + end
+
+    else User DENIES on device
+        U->>IV: Tap Deny on IBM Verify app
+        N->>IV: GET /verifications/{id}
+        IV-->>N: { state: USER_DENIED }
+        N-->>U: SSE push_auth_denied
+        N-->>U: SSE security:hitl_result — error
+        Note over N: CAEP: session-revoked — push auth denied
+        N-->>U: SSE session_revoked — session terminated
+    end
+    end
+    </pre>
+  </div>
+
+  <script>
+    let currentScale = 1;
+    function zoomIn() {
+      currentScale = Math.min(currentScale + 0.15, 3);
+      document.querySelector('.mermaid svg').style.transform = `scale(${currentScale})`;
+      document.querySelector('.mermaid svg').style.transformOrigin = 'top center';
+    }
+    function zoomOut() {
+      currentScale = Math.max(currentScale - 0.15, 0.3);
+      document.querySelector('.mermaid svg').style.transform = `scale(${currentScale})`;
+      document.querySelector('.mermaid svg').style.transformOrigin = 'top center';
+    }
+  </script>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      sequence: {
+        diagramMarginX: 20,
+        diagramMarginY: 20,
+        actorMargin: 80,
+        width: 180,
+        height: 50,
+        boxMargin: 10,
+        boxTextMargin: 8,
+        noteMargin: 12,
+        messageMargin: 40,
+        mirrorActors: true,
+        useMaxWidth: false,
+        wrap: true,
+        wrapPadding: 15,
+      },
+      themeVariables: {
+        noteBkgColor: '#1e293b',
+        noteBorderColor: '#475569',
+        noteTextColor: '#e2e8f0',
+        actorBkg: '#1e293b',
+        actorBorder: '#475569',
+        actorTextColor: '#f1f5f9',
+        signalColor: '#94a3b8',
+        signalTextColor: '#e2e8f0',
+        labelBoxBkgColor: '#1e293b',
+        labelBoxBorderColor: '#475569',
+        labelTextColor: '#e2e8f0',
+        loopTextColor: '#e2e8f0',
+        activationBorderColor: '#3b82f6',
+        activationBkgColor: '#1e3a5f',
+        sequenceNumberColor: '#f1f5f9',
+      },
+    });
+  </script>
+</body>
+</html>

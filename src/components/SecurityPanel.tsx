@@ -3,18 +3,39 @@
 import { useEffect, useState } from "react";
 import { XIcon, BotIcon, ShieldCheckIcon, KeyIcon, DatabaseIcon, CheckCircleIcon } from "./Icons";
 
+export interface SecurityEvent {
+  type: string;        // 'security:token_exchange', 'security:vault_fetch', etc.
+  node: string;        // 'agent' | 'verify' | 'vault' | 'api'
+  status: string;      // 'active' | 'complete' | 'error'
+  message: string;     // Human-readable log line
+  timestamp: string;   // ISO timestamp
+}
+
 interface SecurityPanelProps {
   isOpen: boolean;
   onClose: () => void;
+  events?: SecurityEvent[];
 }
 
-const nodes = [
+type NodeStatus = "complete" | "active" | "pending";
+
+interface NodeDef {
+  id: string;
+  label: string;
+  sublabel?: string;
+  caption: string;
+  Icon: typeof BotIcon;
+  status: NodeStatus;
+}
+
+// Default static nodes (used when no live events)
+const defaultNodes: NodeDef[] = [
   {
     id: "agent",
     label: "DDR Bank AI Agent",
     caption: "Receives natural language transfer request",
     Icon: BotIcon,
-    status: "complete" as const,
+    status: "complete",
   },
   {
     id: "verify",
@@ -22,7 +43,7 @@ const nodes = [
     sublabel: "Identity & Policy Engine",
     caption: "Evaluates risk, enforces adaptive access policy, issues authorization decision",
     Icon: ShieldCheckIcon,
-    status: "complete" as const,
+    status: "complete",
   },
   {
     id: "vault",
@@ -30,18 +51,18 @@ const nodes = [
     sublabel: "Secrets & Credential Broker",
     caption: "Generates short-lived, scoped credential for the transfer API",
     Icon: KeyIcon,
-    status: "active" as const,
+    status: "active",
   },
   {
     id: "api",
     label: "Core Banking API",
     caption: "Executes the $500 transfer with the ephemeral credential",
     Icon: DatabaseIcon,
-    status: "pending" as const,
+    status: "pending",
   },
 ];
 
-const logEntries = [
+const defaultLogEntries = [
   { time: "14:32:01", text: "AI Agent parsed transfer intent: $500 Checking → Savings", level: "info" },
   { time: "14:32:01", text: "Identity verification requested from IBM Verify", level: "info" },
   { time: "14:32:02", text: "IBM Verify — Adaptive risk score: LOW — Authorization: GRANTED", level: "success" },
@@ -50,7 +71,7 @@ const logEntries = [
   { time: "14:32:03", text: "Executing transfer via Core Banking API…", level: "pending" },
 ];
 
-function StatusDot({ status }: { status: "complete" | "active" | "pending" }) {
+function StatusDot({ status }: { status: NodeStatus }) {
   if (status === "complete") {
     return <CheckCircleIcon className="w-4 h-4 text-success" />;
   }
@@ -87,8 +108,32 @@ function FlowArrow({ active }: { active?: boolean }) {
   );
 }
 
-export default function SecurityPanel({ isOpen, onClose }: SecurityPanelProps) {
+export default function SecurityPanel({ isOpen, onClose, events = [] }: SecurityPanelProps) {
   const [visibleLogs, setVisibleLogs] = useState(0);
+
+  // Derive node statuses from live events (if any), otherwise use defaults
+  const hasLiveEvents = events.length > 0;
+
+  const nodes: NodeDef[] = hasLiveEvents
+    ? defaultNodes.map((node) => {
+        const nodeEvents = events.filter((e) => e.node === node.id);
+        const lastEvent = nodeEvents[nodeEvents.length - 1];
+        let status: NodeStatus = "pending";
+        if (lastEvent) {
+          status = lastEvent.status as NodeStatus;
+        }
+        const caption = lastEvent?.message ?? node.caption;
+        return { ...node, status, caption };
+      })
+    : defaultNodes;
+
+  const logEntries = hasLiveEvents
+    ? events.map((e) => ({
+        time: new Date(e.timestamp).toLocaleTimeString("en-US", { hour12: false }),
+        text: e.message,
+        level: e.status === "complete" ? "success" : e.status === "error" ? "danger" : "info",
+      }))
+    : defaultLogEntries;
 
   useEffect(() => {
     if (isOpen) {
@@ -104,7 +149,7 @@ export default function SecurityPanel({ isOpen, onClose }: SecurityPanelProps) {
       }, 400);
       return () => clearInterval(interval);
     }
-  }, [isOpen]);
+  }, [isOpen, logEntries.length]);
 
   return (
     <>
@@ -127,7 +172,7 @@ export default function SecurityPanel({ isOpen, onClose }: SecurityPanelProps) {
           <div>
             <h2 className="text-lg font-semibold text-white flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-blue-electric animate-pulse" />
-              Security Flow — Live View
+              Security Flow — {hasLiveEvents ? "Live View" : "Demo View"}
             </h2>
             <p className="text-sm text-navy-400 mt-0.5">
               See how HashiCorp Vault and IBM Verify protect this transaction in real time.
@@ -251,7 +296,7 @@ export default function SecurityPanel({ isOpen, onClose }: SecurityPanelProps) {
                     className={
                       entry.level === "success"
                         ? "text-success"
-                        : entry.level === "pending"
+                        : entry.level === "pending" || entry.level === "danger"
                         ? "text-warning"
                         : "text-blue-electric-light"
                     }
@@ -272,7 +317,6 @@ export default function SecurityPanel({ isOpen, onClose }: SecurityPanelProps) {
         {/* Footer */}
         <div className="border-t border-navy-800 px-8 py-4 flex items-center justify-between">
           <div className="flex items-center gap-6">
-            {/* HashiCorp Vault branding */}
             <div className="flex items-center gap-2">
               <div className="w-7 h-7 rounded bg-navy-800 flex items-center justify-center">
                 <KeyIcon className="w-4 h-4 text-gold" />
@@ -285,7 +329,6 @@ export default function SecurityPanel({ isOpen, onClose }: SecurityPanelProps) {
 
             <div className="w-px h-8 bg-navy-800" />
 
-            {/* IBM Verify branding */}
             <div className="flex items-center gap-2">
               <div className="w-7 h-7 rounded bg-navy-800 flex items-center justify-center">
                 <ShieldCheckIcon className="w-4 h-4 text-blue-electric-light" />

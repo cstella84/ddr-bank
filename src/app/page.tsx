@@ -1,49 +1,64 @@
-"use client";
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
+import { parseIdToken } from '@/lib/server/auth';
+import { getOrCreateSession } from '@/lib/server/data-store';
+import DashboardShell from '@/components/DashboardShell';
 
-import { useState } from "react";
-import Navbar from "@/components/Navbar";
-import Dashboard from "@/components/Dashboard";
-import ChatPanel from "@/components/ChatPanel";
-import SecurityPanel from "@/components/SecurityPanel";
-import { MessageIcon } from "@/components/Icons";
+export default async function Home() {
+  const cookieStore = await cookies();
+  const idToken = cookieStore.get('id_token')?.value;
 
-export default function Home() {
-  const [chatOpen, setChatOpen] = useState(false);
-  const [securityOpen, setSecurityOpen] = useState(false);
+  if (!idToken) {
+    redirect('/login');
+  }
 
-  const handleViewSecurityFlow = () => {
-    setChatOpen(false);
-    setTimeout(() => setSecurityOpen(true), 200);
+  let user;
+  try {
+    user = parseIdToken(idToken);
+  } catch {
+    redirect('/login?error=invalid_token');
+  }
+
+  // Initialize in-memory session with user's data
+  const session = getOrCreateSession(
+    user.uniqueSecurityName,
+    user.preferred_username,
+    user.displayName
+  );
+
+  // Serialize session data for client components
+  const userData = {
+    displayName: user.displayName,
+    email: user.email,
+    initials: user.displayName
+      .split(' ')
+      .map((n: string) => n[0])
+      .join('')
+      .toUpperCase()
+      .slice(0, 2) || user.displayName.slice(0, 2).toUpperCase(),
   };
 
+  const accounts = session.accounts.map((a) => ({
+    id: a.id,
+    name: a.name,
+    type: a.type,
+    balance: a.balance,
+  }));
+
+  const transactions = session.transactions.slice(0, 10).map((t) => ({
+    id: t.id,
+    amount: t.amount,
+    type: t.type,
+    description: t.description,
+    status: t.status,
+    createdAt: t.createdAt,
+  }));
+
   return (
-    <div className="min-h-screen flex flex-col bg-navy-50">
-      <Navbar />
-      <Dashboard />
-
-      {/* Floating AI Assistant Button */}
-      <button
-        onClick={() => setChatOpen(true)}
-        className={`fixed bottom-8 right-8 z-20 flex items-center gap-2.5 px-5 py-3 bg-blue-electric hover:bg-blue-electric-dark text-white rounded-full shadow-lg hover:shadow-xl transition-all duration-200 animate-pulse-glow ${
-          chatOpen ? "opacity-0 pointer-events-none" : "opacity-100"
-        }`}
-      >
-        <MessageIcon className="w-5 h-5" />
-        <span className="text-sm font-medium">AI Assistant</span>
-      </button>
-
-      {/* Chat Panel */}
-      <ChatPanel
-        isOpen={chatOpen}
-        onClose={() => setChatOpen(false)}
-        onViewSecurityFlow={handleViewSecurityFlow}
-      />
-
-      {/* Security Architecture Panel */}
-      <SecurityPanel
-        isOpen={securityOpen}
-        onClose={() => setSecurityOpen(false)}
-      />
-    </div>
+    <DashboardShell
+      user={userData}
+      accounts={accounts}
+      transactions={transactions}
+    />
   );
 }

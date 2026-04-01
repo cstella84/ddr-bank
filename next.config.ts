@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  serverExternalPackages: ["spiffe"],
+  turbopack: {
+    resolveAlias: {
+      spiffe: "./src/lib/spiffe-stub.js",
+    },
+  },
 };
 
 export default nextConfig;
