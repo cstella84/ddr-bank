@@ -1,9 +1,27 @@
+import { getVaultSecret } from '@/lib/server/vault';
 import { emitAssuranceLevelChange } from './caep';
 
 type SendFn = (data: Record<string, unknown>) => void;
 
 // Pending MFA challenges — keyed by sessionId
 const pendingMFA = new Map<string, { id: string }>();
+
+// Cache the agentic API credentials from Vault
+let cachedAgenticId: string | null = null;
+let cachedAgenticSecret: string | null = null;
+let agenticCredsExpiry = 0;
+const AGENTIC_CREDS_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+async function getAgenticCredentials(): Promise<{ id: string; secret: string }> {
+  if (cachedAgenticId && cachedAgenticSecret && Date.now() < agenticCredsExpiry) {
+    return { id: cachedAgenticId, secret: cachedAgenticSecret };
+  }
+  cachedAgenticId = await getVaultSecret('agentic-api', 'client_id');
+  cachedAgenticSecret = await getVaultSecret('agentic-api', 'client_secret');
+  agenticCredsExpiry = Date.now() + AGENTIC_CREDS_TTL_MS;
+  console.log('[Vault] Agentic API credentials retrieved (secret/agentic-api)');
+  return { id: cachedAgenticId, secret: cachedAgenticSecret };
+}
 
 /** Get the API token for IBM Verify operations (MFA, push auth). */
 let apiToken: string | null = null;
@@ -12,9 +30,7 @@ let apiTokenExpiry = 0;
 async function getAPIToken(): Promise<string> {
   if (apiToken && Date.now() < apiTokenExpiry) return apiToken;
 
-  const id = process.env.AGENTIC_API_ID;
-  const secret = process.env.AGENTIC_API_SECRET;
-  if (!id || !secret) throw new Error('AGENTIC_API_ID/SECRET not configured');
+  const { id, secret } = await getAgenticCredentials();
 
   const res = await fetch(`${process.env.OIDC_BASE_URI}/v1.0/endpoint/default/token`, {
     method: 'POST',

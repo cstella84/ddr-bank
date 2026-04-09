@@ -1,4 +1,5 @@
 import { introspectToken } from '@/lib/server/vault';
+import { resolveAccount } from '@/lib/server/data-store';
 import { TOOL_SCOPES } from './tools';
 import { exchangeToken } from './token-exchange';
 import { triggerHITL, pollHITLStatus, exchangeHITLAssertion } from './hitl';
@@ -38,21 +39,49 @@ export async function preToolCallMiddleware(
   const { sessionId, accessToken, email, verifyUserId, send } = ctx;
 
   // === 1. TOKEN INTROSPECTION ===
+  // Stage 1 has three tiers: agent-introspect, vault-oidc, verify-introspect
   emitSecurityEvent(send, {
     type: 'introspection',
-    node: 'verify',
+    node: 'agent-introspect',
     status: 'active',
-    message: `Validating session token for ${toolName}...`,
+    message: `Agent validating session for ${toolName}`,
+  });
+  emitSecurityEvent(send, {
+    type: 'vault_fetch_oidc',
+    node: 'vault-oidc',
+    status: 'active',
+    message: 'Fetching oidc-smt client secret',
   });
 
   try {
     const introspection = await introspectToken(accessToken);
+
+    emitSecurityEvent(send, {
+      type: 'vault_fetch_oidc',
+      node: 'vault-oidc',
+      status: 'complete',
+      message: 'oidc-smt secret retrieved',
+    });
+
+    emitSecurityEvent(send, {
+      type: 'introspection',
+      node: 'verify-introspect',
+      status: 'active',
+      message: 'POST /oauth2/introspect',
+    });
+
     if (!(introspection as Record<string, unknown>).active) {
       emitSecurityEvent(send, {
         type: 'introspection',
-        node: 'verify',
+        node: 'verify-introspect',
         status: 'error',
-        message: 'Token introspection returned inactive — session revoked',
+        message: 'Token inactive — session revoked',
+      });
+      emitSecurityEvent(send, {
+        type: 'introspection',
+        node: 'agent-introspect',
+        status: 'error',
+        message: 'Session revoked',
       });
 
       await emitSessionRevoked(email, verifyUserId, {
@@ -71,39 +100,47 @@ export async function preToolCallMiddleware(
 
     emitSecurityEvent(send, {
       type: 'introspection',
-      node: 'verify',
+      node: 'verify-introspect',
       status: 'complete',
-      message: 'Token validated — session is active',
+      message: 'Token validated — session active',
+    });
+    emitSecurityEvent(send, {
+      type: 'introspection',
+      node: 'agent-introspect',
+      status: 'complete',
+      message: 'Session active',
     });
   } catch (err) {
     if ((err as Error).message === 'Session expired or revoked') throw err;
     console.warn('[Introspection] Error (failing open):', (err as Error).message);
   }
 
-  // === 2. SUSPICIOUS ACTIVITY GUARD (transfers > $10k) ===
+  // === 2. SUSPICIOUS ACTIVITY GUARD (transfers to external accounts) ===
   if (toolName === 'transfer_funds') {
-    const amount = parseFloat(String(toolArgs.amount)) || 0;
-    if (amount > 10000) {
+    const toAccountId = String(toolArgs.toAccountId ?? '');
+    const toAccount = resolveAccount(sessionId, toAccountId);
+    if (!toAccount) {
+      const amount = parseFloat(String(toolArgs.amount)) || 0;
       emitSecurityEvent(send, {
         type: 'suspicious_activity',
-        node: 'agent',
+        node: 'agent-exchange',
         status: 'error',
-        message: `Suspicious transfer of $${amount.toLocaleString()} — session revoked`,
+        message: `Suspicious transfer to "${toAccountId}" — session revoked`,
       });
 
       await emitSessionRevoked(email, verifyUserId, {
         reasonAdmin: {
-          en: `Suspicious: transfer of $${amount} exceeds $10,000 threshold`,
+          en: `Suspicious: transfer of $${amount} to unrecognized external account "${toAccountId}"`,
         },
         reasonUser: {
-          en: `Your session has been terminated due to a suspicious transfer attempt of $${amount.toLocaleString()}.`,
+          en: `Your session has been terminated due to a suspicious transfer attempt to an external account.`,
         },
         initiatingEntity: 'policy',
       });
 
       send({
         role: 'ai',
-        content: `Suspicious activity detected — a transfer of $${amount.toLocaleString()} was attempted. Your session has been revoked.`,
+        content: `Suspicious activity detected — a transfer to an external account ("${toAccountId}") was attempted. Your session has been revoked.`,
         type: 'session_revoked',
       });
       throw new Error('Suspicious activity — session revoked');
@@ -111,21 +148,21 @@ export async function preToolCallMiddleware(
   }
 
   // === 3. RAR TOKEN EXCHANGE ===
+  // Stage 2 has three tiers: agent-exchange, vault-tokenex, verify-token
   const requiredScope = TOOL_SCOPES[toolName];
   if (!requiredScope) return null;
 
   emitSecurityEvent(send, {
     type: 'token_exchange',
-    node: 'verify',
+    node: 'agent-exchange',
     status: 'active',
-    message: `Requesting scoped token: ${requiredScope}`,
+    message: `Requesting scope: ${requiredScope}`,
   });
-
   emitSecurityEvent(send, {
-    type: 'vault_fetch',
-    node: 'vault',
+    type: 'vault_fetch_tokenex',
+    node: 'vault-tokenex',
     status: 'active',
-    message: 'Fetching client credentials from Vault...',
+    message: 'Fetching token-exchange client secret',
   });
 
   try {
@@ -133,28 +170,66 @@ export async function preToolCallMiddleware(
     const tokenResult = await exchangeToken(accessToken, requiredScope, amount);
 
     emitSecurityEvent(send, {
-      type: 'vault_fetch',
-      node: 'vault',
+      type: 'vault_fetch_tokenex',
+      node: 'vault-tokenex',
       status: 'complete',
-      message: 'Client credentials retrieved from Vault',
+      message: 'token-exchange secret retrieved',
     });
-
     emitSecurityEvent(send, {
       type: 'token_exchange',
-      node: 'verify',
+      node: 'verify-token',
+      status: 'active',
+      message: 'RFC 8693 token-exchange',
+    });
+    emitSecurityEvent(send, {
+      type: 'token_exchange',
+      node: 'verify-token',
       status: 'complete',
       message: `Scoped token issued: ${requiredScope}`,
+    });
+    emitSecurityEvent(send, {
+      type: 'token_exchange',
+      node: 'agent-exchange',
+      status: 'complete',
+      message: `Received scoped token`,
     });
 
     return tokenResult.access_token;
   } catch (err: unknown) {
     // HITL required — IBM Verify returned mfa_challenge
     if ((err as any)?.mfaChallenge) {
+      // Stage 2 completes (exchange succeeded — the mfa_challenge is a valid response)
+      emitSecurityEvent(send, {
+        type: 'vault_fetch_tokenex',
+        node: 'vault-tokenex',
+        status: 'complete',
+        message: 'token-exchange secret retrieved',
+      });
+      emitSecurityEvent(send, {
+        type: 'token_exchange',
+        node: 'verify-token',
+        status: 'complete',
+        message: 'Policy returned mfa_challenge',
+      });
+      emitSecurityEvent(send, {
+        type: 'token_exchange',
+        node: 'agent-exchange',
+        status: 'complete',
+        message: 'Step-up required',
+      });
+
+      // Stage 3: HITL push auth
       emitSecurityEvent(send, {
         type: 'hitl_triggered',
-        node: 'verify',
+        node: 'agent-hitl',
         status: 'active',
-        message: 'Step-up authorization required — sending push notification',
+        message: 'Polling for push approval',
+      });
+      emitSecurityEvent(send, {
+        type: 'hitl_triggered',
+        node: 'verify-push',
+        status: 'active',
+        message: 'POST /authenticators/{id}/verifications',
       });
 
       const mfaToken = (err as any).mfaToken;
@@ -179,9 +254,28 @@ export async function preToolCallMiddleware(
       if (result.approved && result.assertion) {
         emitSecurityEvent(send, {
           type: 'hitl_result',
-          node: 'verify',
+          node: 'verify-push',
           status: 'complete',
-          message: 'Push authorization approved — exchanging assertion for scoped token',
+          message: 'User approved push',
+        });
+        // Assertion exchange reuses the token-exchange secret (cached)
+        emitSecurityEvent(send, {
+          type: 'vault_fetch_assertion',
+          node: 'vault-assertion',
+          status: 'active',
+          message: 'Using token-exchange secret for jwt-bearer',
+        });
+        emitSecurityEvent(send, {
+          type: 'vault_fetch_assertion',
+          node: 'vault-assertion',
+          status: 'complete',
+          message: 'token-exchange secret (cached)',
+        });
+        emitSecurityEvent(send, {
+          type: 'hitl_result',
+          node: 'agent-hitl',
+          status: 'complete',
+          message: 'Exchanging assertion → scoped token',
         });
 
         const scopedToken = await exchangeHITLAssertion(result.assertion, requiredScope);
@@ -191,9 +285,15 @@ export async function preToolCallMiddleware(
       // HITL denied — revoke session
       emitSecurityEvent(send, {
         type: 'hitl_result',
-        node: 'verify',
+        node: 'verify-push',
         status: 'error',
-        message: 'Push authorization denied — session revoked',
+        message: 'Push denied or timed out',
+      });
+      emitSecurityEvent(send, {
+        type: 'hitl_result',
+        node: 'agent-hitl',
+        status: 'error',
+        message: 'Authorization failed — session revoked',
       });
 
       await emitSessionRevoked(email, verifyUserId, {
@@ -215,7 +315,7 @@ export async function preToolCallMiddleware(
 
     emitSecurityEvent(send, {
       type: 'token_exchange',
-      node: 'verify',
+      node: 'verify-token',
       status: 'error',
       message: `Token exchange failed: ${(err as Error).message}`,
     });

@@ -1,9 +1,42 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { BotIcon, SendIcon, XIcon, LockIcon, ShieldCheckIcon } from "./Icons";
+import { useState, useRef, useEffect, type ReactNode } from "react";
+import { BotIcon, SendIcon, XIcon, LockIcon, ShieldCheckIcon, KeyIcon } from "./Icons";
 import { useChat } from "@/lib/hooks/useChat";
 import type { SecurityEvent } from "./SecurityPanel";
+
+/**
+ * Render a small subset of inline markdown (`**bold**`, `*italic*`, `` `code` ``)
+ * as React nodes. Anything else passes through verbatim. Hand-rolled to avoid
+ * pulling in react-markdown for three patterns.
+ */
+function renderMarkdown(text: string): ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*|(?<!\*)\*[^*\n]+\*(?!\*)|`[^`]+`)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return (
+        <strong key={i} className="font-semibold">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code key={i} className="font-mono text-[12px] px-1 py-0.5 rounded bg-navy-200">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    if (part.startsWith("*") && part.endsWith("*")) {
+      return (
+        <em key={i} className="italic">
+          {part.slice(1, -1)}
+        </em>
+      );
+    }
+    return part;
+  });
+}
 
 interface ChatPanelProps {
   isOpen: boolean;
@@ -11,20 +44,34 @@ interface ChatPanelProps {
   onViewSecurityFlow: () => void;
   onSecurityEvent?: (event: SecurityEvent) => void;
   onDataUpdated?: () => void;
+  onClearSecurityEvents?: () => void;
+  securityOpen?: boolean;
 }
 
-export default function ChatPanel({ isOpen, onClose, onViewSecurityFlow, onSecurityEvent, onDataUpdated }: ChatPanelProps) {
+export default function ChatPanel({ isOpen, onClose, onViewSecurityFlow, onSecurityEvent, onDataUpdated, onClearSecurityEvents, securityOpen }: ChatPanelProps) {
   const { messages, isStreaming, pushAuthState, pollAttempt, sessionRevoked, sendMessage, clearChat } = useChat(onSecurityEvent, onDataUpdated);
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Return focus to the input when it becomes enabled again after streaming.
+  // Disabling an <input> drops focus to <body>, so the user otherwise has to
+  // click back into the box to send the next message.
+  const isInputDisabled = isStreaming || sessionRevoked || pushAuthState === 'pending' || pushAuthState === 'polling';
+  useEffect(() => {
+    if (!isInputDisabled && isOpen) {
+      inputRef.current?.focus();
+    }
+  }, [isInputDisabled, isOpen]);
+
   const handleSend = () => {
     if (!input.trim() || isStreaming || sessionRevoked) return;
+    onClearSecurityEvents?.();
     sendMessage(input);
     setInput("");
   };
@@ -36,17 +83,17 @@ export default function ChatPanel({ isOpen, onClose, onViewSecurityFlow, onSecur
     }
   };
 
-  const isInputDisabled = isStreaming || sessionRevoked || pushAuthState === 'pending' || pushAuthState === 'polling';
-
   return (
     <>
-      {/* Backdrop */}
-      <div
-        className={`fixed inset-0 bg-black/20 z-30 transition-opacity duration-300 ${
-          isOpen ? "opacity-100" : "opacity-0 pointer-events-none"
-        }`}
-        onClick={onClose}
-      />
+      {/* Backdrop — hidden when security panel is open to keep it visible */}
+      {!securityOpen && (
+        <div
+          className={`fixed inset-0 bg-black/20 z-30 transition-opacity duration-300 ${
+            isOpen ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+          onClick={onClose}
+        />
+      )}
 
       {/* Panel */}
       <div
@@ -60,14 +107,26 @@ export default function ChatPanel({ isOpen, onClose, onViewSecurityFlow, onSecur
             <BotIcon className="w-4 h-4 text-blue-electric" />
           </div>
           <div className="flex-1">
-            <p className="text-sm font-semibold text-navy-950">DDR Bank AI Assistant</p>
+            <p className="text-sm font-semibold text-navy-950">CDL Bank AI Assistant</p>
             <p className="text-[11px] text-success flex items-center gap-1">
               <span className={`w-1.5 h-1.5 rounded-full inline-block ${sessionRevoked ? 'bg-danger' : 'bg-success'}`} />
               {sessionRevoked ? "Session Revoked" : "Online"}
             </p>
           </div>
           <button
-            onClick={clearChat}
+            onClick={onViewSecurityFlow}
+            className={`flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded transition-colors ${
+              securityOpen
+                ? "text-blue-electric bg-blue-electric/10"
+                : "text-navy-400 hover:text-blue-electric hover:bg-blue-electric/5"
+            }`}
+            title="Toggle security flow view"
+          >
+            <KeyIcon className="w-3 h-3" />
+            Security
+          </button>
+          <button
+            onClick={() => { clearChat(); onClearSecurityEvents?.(); }}
             className="text-[10px] text-navy-400 hover:text-navy-600 transition-colors px-2 py-1 rounded"
             title="Clear chat"
           >
@@ -173,7 +232,7 @@ export default function ChatPanel({ isOpen, onClose, onViewSecurityFlow, onSecur
                       : "bg-navy-100 text-navy-900 rounded-bl-md"
                   }`}
                 >
-                  {msg.content}
+                  {msg.role === "assistant" ? renderMarkdown(msg.content) : msg.content}
                 </div>
               </div>
             );
@@ -199,6 +258,7 @@ export default function ChatPanel({ isOpen, onClose, onViewSecurityFlow, onSecur
         <div className="border-t border-navy-200 p-4 flex-shrink-0">
           <div className="flex items-center gap-2 bg-navy-50 rounded-xl px-4 py-2.5 border border-navy-200 focus-within:border-blue-electric focus-within:ring-2 focus-within:ring-blue-electric/20 transition-all">
             <input
+              ref={inputRef}
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}

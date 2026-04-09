@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DDR Bank — Secure Digital Banking",
+  title: "CDL Bank — Secure Digital Banking",
   description: "Modern banking powered by agentic AI with runtime security",
 };
 

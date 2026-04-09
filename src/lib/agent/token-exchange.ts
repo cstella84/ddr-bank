@@ -51,7 +51,7 @@ export async function exchangeToken(
   if (scope === 'transfer:all' && amount != null) {
     params.authorization_details = JSON.stringify([
       {
-        type: 'transfer',
+        type: 'transfer_funds',
         instructedAmount: {
           amount: amount.toString(),
           currency: 'USD',

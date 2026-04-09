@@ -176,9 +176,16 @@ export async function runAgent(
       try {
         send({
           type: 'security:tool_execute',
-          node: 'api',
+          node: 'agent-execute',
           status: 'active',
-          message: `Executing ${toolCall.name}...`,
+          message: `Calling ${toolCall.name}`,
+          timestamp: new Date().toISOString(),
+        });
+        send({
+          type: 'security:tool_execute',
+          node: 'core-api',
+          status: 'active',
+          message: `Executing ${toolCall.name}`,
           timestamp: new Date().toISOString(),
         });
 
@@ -192,9 +199,16 @@ export async function runAgent(
 
         send({
           type: 'security:tool_execute',
-          node: 'api',
+          node: 'core-api',
           status: 'complete',
-          message: `${toolCall.name} completed successfully`,
+          message: `${toolCall.name} completed`,
+          timestamp: new Date().toISOString(),
+        });
+        send({
+          type: 'security:tool_execute',
+          node: 'agent-execute',
+          status: 'complete',
+          message: 'Tool result received',
           timestamp: new Date().toISOString(),
         });
 

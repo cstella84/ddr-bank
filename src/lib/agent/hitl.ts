@@ -1,4 +1,3 @@
-import { getAPIToken } from './mfa';
 import { getExchangeSecret } from './token-exchange';
 import { emitAssuranceLevelChange, emitSessionRevoked } from './caep';
 
@@ -14,8 +13,8 @@ interface HITLResult {
 
 /**
  * Trigger HITL push auth via IBM Verify.
- * Sends a push notification to the user's authenticator app.
- * Returns the transaction URI for polling.
+ * Uses the mfa_challenge token (returned by IBM Verify during RAR token exchange)
+ * to list the user's enrolled factors and send a push notification.
  */
 export async function triggerHITL(
   mfaChallengeToken: string,
@@ -24,50 +23,54 @@ export async function triggerHITL(
   verifyUserId: string | null,
   send: SendFn
 ): Promise<{ transactionUri: string; pushAuthId: string }> {
-  const apiToken = await getAPIToken();
-
-  // List user's enrolled factors
+  // List user's enrolled factors using the mfa_challenge token
   const factorsRes = await fetch(
-    `${process.env.OIDC_BASE_URI}/v2.0/factors?search=userId%3D%22${encodeURIComponent(verifyUserId || email)}%22`,
+    `${process.env.OIDC_BASE_URI}/v2.0/factors`,
     {
-      headers: { Authorization: `Bearer ${apiToken}`, Accept: 'application/json' },
+      headers: { Authorization: `Bearer ${mfaChallengeToken}`, Accept: 'application/json' },
     }
   );
 
   if (!factorsRes.ok) throw new Error(`Failed to list factors: ${factorsRes.status}`);
   const factors = await factorsRes.json();
 
-  // Find signature/userPresence factor
+  // Find signature/userPresence factor (exclude SDK registrations)
   const factor = factors.factors?.find(
     (f: Record<string, unknown>) =>
-      f.type === 'signature' || f.type === 'userPresence'
+      f.type === 'signature' && (f as Record<string, unknown>).subType === 'userPresence' &&
+      !(f as Record<string, unknown>).additionalData
   );
   if (!factor) throw new Error('No push-capable authenticator enrolled');
 
   // Get the authenticator
-  const authenticator = factor.references?.[0];
-  if (!authenticator?.authenticatorId) throw new Error('No authenticator found for factor');
+  const authenticator = (factor.references as Record<string, unknown>[] | undefined)?.[0] ??
+    (factor as Record<string, unknown>).references;
+  const authenticatorId = (authenticator as Record<string, unknown>)?.authenticatorId;
+  if (!authenticatorId) throw new Error('No authenticator found for factor');
 
   // Send push verification
   const pushRes = await fetch(
-    `${process.env.OIDC_BASE_URI}/v1.0/authenticators/${authenticator.authenticatorId}/verifications`,
+    `${process.env.OIDC_BASE_URI}/v1.0/authenticators/${authenticatorId}/verifications`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${apiToken}`,
+        Authorization: `Bearer ${mfaChallengeToken}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },
       body: JSON.stringify({
         transactionData: {
           message: `Authorize AI agent to transfer $${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
+          originIpAddress: '192.168.222.222',
+          originUserAgent: 'Mozilla Firefox 11',
         },
         pushNotification: {
           send: true,
-          title: 'DDR Bank — Fund Transfer Authorization',
+          title: 'CDL Bank — Fund Transfer Authorization',
           message: `Approve transfer of $${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}`,
         },
-        authenticationMethods: [{ id: factor.id, methodType: factor.type }],
+        authenticationMethods: [{ id: factor.id, methodType: 'signature' }],
+        logic: 'OR',
         expiresIn: 120,
       }),
     }
@@ -80,8 +83,8 @@ export async function triggerHITL(
   }
 
   const pushData = await pushRes.json();
-  const transactionUri = pushData.id;
-  const pushAuthId = pushData.id;
+  const transactionUri = pushData.transactionUri;
+  const pushAuthId = pushData.id || transactionUri;
 
   send({
     role: 'ai',
@@ -95,6 +98,7 @@ export async function triggerHITL(
 
 /**
  * Poll for HITL push auth result.
+ * Uses the mfa_challenge token and the transactionUri (full URL) returned by triggerHITL.
  * Polls every 3 seconds for up to 50 seconds.
  */
 export async function pollHITLStatus(
@@ -104,7 +108,6 @@ export async function pollHITLStatus(
   verifyUserId: string | null,
   send: SendFn
 ): Promise<HITLResult> {
-  const apiToken = await getAPIToken();
   const startTime = Date.now();
   let attempts = 0;
 
@@ -121,14 +124,15 @@ export async function pollHITLStatus(
 
     try {
       const res = await fetch(
-        `${process.env.OIDC_BASE_URI}/v1.0/authenticators/verifications/${transactionUri}`,
+        `${transactionUri}?returnJwt=true`,
         {
-          headers: { Authorization: `Bearer ${apiToken}`, Accept: 'application/json' },
+          headers: { Authorization: `Bearer ${mfaChallengeToken}`, Accept: 'application/json' },
         }
       );
 
       if (!res.ok) continue;
       const data = await res.json();
+      console.log('[HITL] Poll response:', JSON.stringify(data));
 
       if (data.state === 'VERIFY_SUCCESS') {
         send({ role: 'ai', content: 'Push verification approved!', type: 'push_auth_approved' });

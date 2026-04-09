@@ -9,7 +9,7 @@ const SCENARIOS = [
     id: "login",
     label: "User Login",
     color: "#3B82F6",
-    description: "OAuth 2.0 Authorization Code Flow with IBM Verify + Vault secret rotation",
+    description: "OAuth 2.0 Authorization Code Flow with PKCE, IBM Verify + Vault dynamic client secret",
     diagram: `sequenceDiagram
     participant U as User (Browser)
     participant E as Edge Middleware
@@ -24,17 +24,19 @@ const SCENARIOS = [
     N-->>U: Login page rendered
 
     U->>N: Click Sign In — GET /api/auth/redirect
+    Note over N: Generate PKCE: code_verifier (random) + code_challenge (S256)<br/>Set httpOnly pkce_verifier cookie (5 min TTL)
     N->>IV: 302 /oauth2/authorize
-    Note over IV: scope: openid profile email agentic<br/>authorization_details: [{type: "environment"}]
+    Note over IV: scope: openid profile email agentic<br/>code_challenge_method=S256<br/>authorization_details: [{type: "environment"}]
     IV-->>U: IBM Verify login page
     U->>IV: Enter credentials
     IV-->>U: 302 /api/auth/callback?code=AUTH_CODE
 
     U->>N: GET /api/auth/callback?code=AUTH_CODE
-    N->>V: getSecrets() — resolve Vault credential
+    Note over N: Read pkce_verifier from cookie
+    N->>V: getSecrets() — resolve oidc-smt credential
     V->>V: GET /v1/ibm-verify/creds/oidc-smt
     V-->>N: client_secret (cached 1hr)
-    N->>IV: POST /oauth2/token — grant_type=authorization_code
+    N->>IV: POST /oauth2/token<br/>grant_type=authorization_code + code_verifier (PKCE)
 
     alt CSIAQ0155E — stale Vault-rotated secret
         IV-->>N: Error CSIAQ0155E
@@ -44,22 +46,24 @@ const SCENARIOS = [
         N->>IV: POST /oauth2/token (retry with new secret)
     end
 
-    IV-->>N: access_token + id_token + refresh_token
-    N->>N: parseIdToken — uniqueSecurityName
-    N->>N: clearSession() + setAuthCookies()
-    N-->>U: 302 to / with Set-Cookie: access_token, id_token
+    IV-->>N: access_token + id_token
+    N->>N: parseIdToken — extract uniqueSecurityName claim
+    N->>N: clearSession(uniqueSecurityName) — drop stale agent state
+    N->>N: setAuthCookies() — access_token, id_token (httpOnly)
+    N->>N: delete pkce_verifier cookie
+    N-->>U: 302 to / with Set-Cookie
 
     U->>E: GET / (with cookies)
     E->>E: access_token present — allow
     E-->>N: NextResponse.next() + no-cache headers
-    N->>N: Server Component reads cookies, init per-user data
+    N->>N: Server Component reads cookies, initializes per-user data store
     N-->>U: Dashboard rendered`,
   },
   {
     id: "balances",
     label: "Account Balances",
     color: "#22C55E",
-    description: "Read-only tool call with token introspection and RAR token exchange",
+    description: "Read-only tool call — introspection + RAR token exchange, no step-up (bypass path)",
     diagram: `sequenceDiagram
     participant U as User (Browser)
     participant N as Next.js (Vercel)
@@ -71,39 +75,39 @@ const SCENARIOS = [
     Note over N: "What are my account balances?"
 
     Note over N: Guardrails: injection, off-topic, cross-user — all pass
-
-    N->>V: getVaultSecret('GEMINI_API_KEY_SMT')
-    V-->>N: Gemini API key
+    Note over N,G: Gemini API key cached at module level<br/>(Vault GEMINI_API_KEY_SMT, fetched once on cold start)
     N->>G: invoke() with system prompt + 6 tools
     G-->>N: tool_call: get_account_data
 
-    Note over N,IV: MIDDLEWARE Step 1 — Token Introspection
-    N->>V: getSecrets() — cached client_secret
+    Note over N,IV: STAGE 1 — Token Introspection
+    N->>V: getSecrets() — oidc-smt
+    V-->>N: client_secret (cached)
+    N-->>U: SSE security:vault_fetch_oidc — complete
     N->>IV: POST /oauth2/introspect — validate access_token
     IV-->>N: { active: true }
-    N-->>U: SSE security:introspection — active
+    N-->>U: SSE security:introspection — complete
 
-    Note over N,IV: MIDDLEWARE Step 2 — RAR Token Exchange
-    N->>V: getSecrets() — cached
-    N-->>U: SSE security:vault_fetch — complete
-    N->>IV: POST /oauth2/token — grant_type=token-exchange
-    Note over IV: scope=accounts:read
+    Note over N,IV: STAGE 2 — RAR Token Exchange (no HITL — bypass path)
+    N->>V: getExchangeSecret() — token-exchange
+    V-->>N: client_secret (cached)
+    N-->>U: SSE security:vault_fetch_tokenex — complete
+    N->>IV: POST /oauth2/token<br/>grant_type=urn:ietf:params:oauth:grant-type:token-exchange<br/>scope=accounts:read
     IV-->>N: scoped access_token (accounts:read)
     N-->>U: SSE security:token_exchange — complete
 
-    Note over N: Tool Execution
+    Note over N: STAGE 4 — Tool Execution
     N->>N: get_account_data() — in-memory store lookup
     N-->>U: SSE security:tool_execute — complete
 
     N->>G: Summarize tool output for user
     G-->>N: Friendly account summary
-    N-->>U: SSE ai response + end`,
+    N-->>U: SSE delta + end`,
   },
   {
     id: "small-transfer",
     label: "Small Transfer ($50)",
     color: "#EAB308",
-    description: "Transfer with RAR authorization_details — IBM Verify policy approves without step-up",
+    description: "Transfer under user's agenticlimit — IBM Verify policy issues scoped token without step-up",
     diagram: `sequenceDiagram
     participant U as User (Browser)
     participant N as Next.js (Vercel)
@@ -117,33 +121,35 @@ const SCENARIOS = [
     N->>G: invoke() with tools
     G-->>N: tool_call: transfer_funds(checking, savings, 50)
 
-    Note over N,IV: MIDDLEWARE Step 1 — Token Introspection
+    Note over N,IV: STAGE 1 — Token Introspection
+    N->>V: getSecrets() — oidc-smt (cached)
     N->>IV: POST /oauth2/introspect
     IV-->>N: { active: true }
 
-    Note over N: MIDDLEWARE Step 2 — Suspicious Activity Check
-    N->>N: $50 is under $10,000 threshold — OK
+    Note over N: SUSPICIOUS ACTIVITY GUARD
+    N->>N: resolveAccount(toAccountId) — known internal account?
+    Note over N: "savings" is a known account → pass<br/>(unknown destinations would revoke session)
 
-    Note over N,IV: MIDDLEWARE Step 3 — RAR Token Exchange
-    N->>V: getSecrets()
-    V-->>N: client_secret
+    Note over N,IV: STAGE 2 — RAR Token Exchange
+    N->>V: getExchangeSecret() — token-exchange (cached)
     N->>IV: POST /oauth2/token — grant_type=token-exchange
-    Note over IV: scope=transfer:all<br/>authorization_details:<br/>[{type: transfer, amount: 50, currency: USD}]
+    Note over IV: scope=transfer:all<br/>authorization_details: [{type:"transfer_funds",<br/>instructedAmount:{amount:"50",currency:"USD"}}]
+    Note over IV: Policy: int(amount=50) >= agenticlimit(1000)?<br/>FALSE → no step-up required (bypass path)
     IV-->>N: scoped access_token (transfer:all)
-    Note over IV: Policy engine: $50 — no step-up needed
 
-    Note over N: Tool Execution
-    N->>N: transfer_funds(checking to savings, $50)
+    Note over N: STAGE 4 — Tool Execution
+    N->>N: transferFunds(checking → savings, $50)
     N-->>U: SSE security:tool_execute — complete
+    N-->>U: SSE data_updated (refresh dashboard)
     N->>G: Summarize result
     G-->>N: Transfer confirmation
-    N-->>U: SSE ai response + end`,
+    N-->>U: SSE delta + end`,
   },
   {
     id: "large-transfer",
-    label: "Large Transfer ($5K)",
+    label: "Large Transfer ($5K) — HITL",
     color: "#EF4444",
-    description: "Transfer triggers HITL push auth — user must approve on IBM Verify mobile app",
+    description: "Transfer over agenticlimit triggers IBM Verify push auth — approve or session is revoked",
     diagram: `sequenceDiagram
     participant U as User (Browser)
     participant N as Next.js (Vercel)
@@ -157,64 +163,124 @@ const SCENARIOS = [
     N->>G: invoke() with tools
     G-->>N: tool_call: transfer_funds(checking, savings, 5000)
 
-    Note over N,IV: MIDDLEWARE Step 1 — Token Introspection
+    Note over N,IV: STAGE 1 — Token Introspection
+    N->>V: getSecrets() — oidc-smt (cached)
     N->>IV: POST /oauth2/introspect
     IV-->>N: { active: true }
 
-    Note over N: MIDDLEWARE Step 2 — Suspicious Activity Check
-    N->>N: $5,000 is under $10,000 — OK
+    Note over N: SUSPICIOUS ACTIVITY GUARD
+    N->>N: "savings" is internal — pass
 
-    Note over N,IV: MIDDLEWARE Step 3 — RAR Token Exchange — MFA Challenge!
-    N->>V: getSecrets()
-    V-->>N: client_secret
+    Note over N,IV: STAGE 2 — RAR Token Exchange — MFA Challenge!
+    N->>V: getExchangeSecret() — token-exchange (cached)
     N->>IV: POST /oauth2/token — grant_type=token-exchange
-    Note over IV: scope=transfer:all<br/>authorization_details:<br/>[{type: transfer, amount: 5000, currency: USD}]
-    IV-->>N: { scope: mfa_challenge, access_token: mfa_token }
-    Note over IV: Policy engine: $5,000 requires step-up auth!
+    Note over IV: scope=transfer:all<br/>authorization_details: [{type:"transfer_funds",<br/>instructedAmount:{amount:"5000",currency:"USD"}}]
+    Note over IV: Policy: int(amount=5000) >= agenticlimit(1000)?<br/>TRUE → step-up required
+    IV-->>N: { scope:"mfa_challenge", access_token: mfa_challenge_token }
 
-    Note over N,IV: MIDDLEWARE Step 4 — HITL Push Authorization
-    N->>IV: GET /v2.0/factors — list enrolled authenticators
-    IV-->>N: factor: signature / userPresence
+    Note over N,IV: STAGE 3 — HITL Push Authorization
+    N->>IV: GET /v2.0/factors (Bearer mfa_challenge_token)
+    IV-->>N: factors[] — find type=signature, subType=userPresence
     N->>IV: POST /v1.0/authenticators/{id}/verifications
-    Note over IV: Push: "Approve transfer of $5,000.00"
-    IV-->>N: transactionUri
+    Note over IV: pushNotification.message: "Approve transfer of $5,000.00"<br/>expiresIn: 120s
+    IV-->>N: { transactionUri }
     N-->>U: SSE push_auth_pending — check your device
     IV-->>U: Push notification to mobile device
 
-    loop Poll every 3s (max 50s — Vercel limit)
-        N->>IV: GET /v1.0/authenticators/verifications/{id}
+    loop Poll every 3s (max 50s — under Vercel 60s limit)
+        N->>IV: GET {transactionUri}?returnJwt=true
         N-->>U: SSE push_auth_polling (attempt N)
-        IV-->>N: { state: PENDING }
+        IV-->>N: { state: "PENDING" }
     end
 
     alt User APPROVES on device
         U->>IV: Tap Approve on IBM Verify app
-        N->>IV: GET /verifications/{id}
-        IV-->>N: { state: VERIFY_SUCCESS, assertion: JWT }
+        N->>IV: GET {transactionUri}?returnJwt=true
+        IV-->>N: { state: "VERIFY_SUCCESS", assertion: JWT }
         N-->>U: SSE push_auth_approved
+        Note over N: CAEP: assurance-level-change aal1 → aal2
 
-        Note over N,IV: MIDDLEWARE Step 5 — Exchange assertion for scoped token
-        N->>V: getSecrets()
-        V-->>N: client_secret
-        N->>IV: POST /oauth2/token — grant_type=jwt-bearer, assertion=JWT
+        Note over N,IV: STAGE 3 (cont.) — Exchange assertion for scoped token
+        Note over N: Reuses cached token-exchange secret (no new Vault fetch)
+        N-->>U: SSE security:vault_fetch_assertion — complete
+        N->>IV: POST /oauth2/token<br/>grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer<br/>assertion=JWT, scope=transfer:all
         IV-->>N: scoped access_token (transfer:all)
         N-->>U: SSE security:hitl_result — complete
-        Note over N: CAEP: assurance-level-change aal1 to aal2
 
-        Note over N: Tool Execution
-        N->>N: transfer_funds(checking to savings, $5,000)
+        Note over N: STAGE 4 — Tool Execution
+        N->>N: transferFunds(checking → savings, $5,000)
+        N-->>U: SSE security:tool_execute — complete
+        N-->>U: SSE data_updated (refresh dashboard)
         N->>G: Summarize result
         G-->>N: Transfer confirmation
-        N-->>U: SSE ai response + end
+        N-->>U: SSE delta + end
 
-    else User DENIES on device
+    else User DENIES (or push expires)
         U->>IV: Tap Deny on IBM Verify app
-        N->>IV: GET /verifications/{id}
-        IV-->>N: { state: USER_DENIED }
-        N-->>U: SSE push_auth_denied
-        N-->>U: SSE security:hitl_result — error
+        N->>IV: GET {transactionUri}?returnJwt=true
+        IV-->>N: { state: "USER_DENIED" }
+        N-->>U: SSE push_auth_denied (poll exits immediately on deny)
         Note over N: CAEP: session-revoked — push auth denied
-        N-->>U: SSE session_revoked — session terminated
+        N-->>U: SSE session_revoked
+        Note over U: Client auto-redirects to /api/auth/logout after 2s<br/>Token revoked at IBM Verify, cookies cleared, full logout
+    end`,
+  },
+  {
+    id: "reports-mfa",
+    label: "Reports (Email OTP)",
+    color: "#A855F7",
+    description: "Sensitive report tool — gated by email OTP MFA via the agentic-api Vault credential",
+    diagram: `sequenceDiagram
+    participant U as User (Browser)
+    participant N as Next.js (Vercel)
+    participant V as HCP Vault
+    participant IV as IBM Verify
+    participant G as Gemini (LLM)
+
+    Note over U,G: Two-message flow: trigger MFA → user enters code → resume
+
+    U->>N: POST /api/agent/chat — "show me the quarterly report"
+    N->>N: Guardrails — all pass
+    N->>G: invoke()
+    G-->>N: tool_call: get_report_data
+
+    Note over N,IV: STAGE 1 — Token Introspection (passes)
+    Note over N,IV: STAGE 2 — RAR Token Exchange (scope=reports:read, passes)
+
+    Note over N: MFA gate: get_report_data requires email OTP step-up
+    N->>V: getVaultSecret('agentic-api', 'client_id')
+    N->>V: getVaultSecret('agentic-api', 'client_secret')
+    V-->>N: agentic-api credentials (cached 1hr)
+    N->>IV: POST /v1.0/endpoint/default/token<br/>grant_type=client_credentials
+    IV-->>N: api_token (for MFA admin endpoints)
+    N->>IV: POST /v2.0/factors/emailotp/transient/verifications<br/>{ emailAddress, correlation: "Agentic" }
+    IV-->>N: { id: pendingMFAId }
+    IV-->>U: 📧 Email with 6-digit OTP (correlation prefix "Agentic-")
+    N->>N: pendingMFA.set(sessionId, {id})
+    N-->>U: SSE delta — "Enter the 6-digit code from your email"
+    Note over N: Original tool call paused — chat history retains the request
+
+    U->>N: POST /api/agent/chat — "Agentic-123456"
+    N->>N: hasPendingMFA(sessionId) === true → validateMFA branch
+    N->>IV: POST /v2.0/factors/emailotp/transient/verifications/{id}?returnJwt=true<br/>Bearer api_token, body: { otp }
+
+    alt Code valid
+        IV-->>N: 200 OK
+        N->>N: pendingMFA.delete(sessionId)
+        Note over N: CAEP: assurance-level-change aal1 → aal2
+        N-->>U: SSE delta — "MFA verified! Fetching report data now..."
+
+        Note over N: Resume original request — fall through to tool execution
+        N->>N: get_report_data() — in-memory lookup
+        N->>G: Summarize report
+        G-->>N: Report summary
+        N-->>U: SSE delta + end
+
+    else Code invalid
+        IV-->>N: 4xx error
+        Note over N: CAEP: assurance-level unchanged (aal1)
+        N-->>U: SSE delta — "Invalid MFA code. Please try again."
+        N-->>U: end (pendingMFA still set — user can retry)
     end`,
   },
 ];
@@ -306,7 +372,7 @@ export default function AuthFlowDiagram() {
           </div>
           <div>
             <h1 className="text-lg font-semibold text-white tracking-tight">
-              DDR <span className="font-light text-navy-300">Bank</span>
+              CDL <span className="font-light text-navy-300">Bank</span>
               <span className="text-navy-500 font-normal text-sm ml-3">Authentication Flow</span>
             </h1>
           </div>

@@ -15,7 +15,7 @@ export default function Navbar({ user }: NavbarProps) {
           <ShieldIcon className="w-5 h-5 text-navy-950" />
         </div>
         <span className="text-lg font-semibold tracking-tight">
-          DDR <span className="font-light text-navy-300">Bank</span>
+          CDL <span className="font-light text-navy-300">Bank</span>
         </span>
       </div>
 

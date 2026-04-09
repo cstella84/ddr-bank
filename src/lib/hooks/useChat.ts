@@ -203,6 +203,12 @@ export function useChat(onSecurityEvent?: (event: SecurityEvent) => void, onData
                     type: 'session_revoked',
                   },
                 ]);
+                // Force a full logout: revokes token at IBM Verify, clears
+                // cookies + in-memory session, and redirects to /login.
+                // Short delay so the user sees the revocation banner briefly.
+                setTimeout(() => {
+                  window.location.href = '/api/auth/logout';
+                }, 2000);
                 break;
 
               case 'error':

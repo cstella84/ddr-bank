@@ -44,8 +44,7 @@ export default function DashboardShell({ user, accounts: initialAccounts, transa
   const [transactions, setTransactions] = useState(initialTransactions);
 
   const handleViewSecurityFlow = () => {
-    setChatOpen(false);
-    setTimeout(() => setSecurityOpen(true), 200);
+    setSecurityOpen((prev) => !prev);
   };
 
   const handleSecurityEvent = (event: SecurityEvent) => {
@@ -88,6 +87,8 @@ export default function DashboardShell({ user, accounts: initialAccounts, transa
         onViewSecurityFlow={handleViewSecurityFlow}
         onSecurityEvent={handleSecurityEvent}
         onDataUpdated={handleDataUpdated}
+        onClearSecurityEvents={() => setSecurityEvents([])}
+        securityOpen={securityOpen}
       />
 
       {/* Security Architecture Panel */}
@@ -95,6 +96,7 @@ export default function DashboardShell({ user, accounts: initialAccounts, transa
         isOpen={securityOpen}
         onClose={() => setSecurityOpen(false)}
         events={securityEvents}
+        chatOpen={chatOpen}
       />
     </div>
   );

@@ -28,7 +28,7 @@ function LoginContent() {
             <ShieldIcon className="w-7 h-7 text-navy-950" />
           </div>
           <h1 className="text-2xl font-semibold text-white tracking-tight">
-            DDR <span className="font-light text-navy-400">Bank</span>
+            CDL <span className="font-light text-navy-400">Bank</span>
           </h1>
           <p className="text-sm text-navy-500 mt-1">Secure Digital Banking</p>
         </div>
